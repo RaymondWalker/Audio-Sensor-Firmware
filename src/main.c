@@ -12,19 +12,14 @@
 #include "lwip/sockets.h"
 #include "driver/i2s_std.h"
 
-// --- WIFI CONFIG ---
-#define WIFI_SSID      "*"
-#define WIFI_PASS      "*"
 
-// --- Hardware Config (SPH0645) ---
-#define I2S_SCK_PIN     14  // BCLK connected to Pin 14
-#define I2S_WS_PIN      15  // LRCL connected to Pin 15
-#define I2S_SD_PIN      32  // DOUT connected to Pin 32
-#define SAMPLE_RATE     44100
-#define READ_LEN        1024
-// --- TCP Config ---
-#define HOST_IP_ADDR "192.168.0.14"
-#define PORT 3333
+/*
+---------------------------------------------
+Edit IP + SSID in secrets.ini
+Edit Hardware config + port in platformio.ini
+---------------------------------------------
+*/
+
 
 static const char *TAG = "sound_tcp_node";
 static i2s_chan_handle_t rx_handle = NULL;
