@@ -13,6 +13,13 @@
 #include "driver/i2s_std.h"
 
 
+// Raw value 
+#define PACKET_SIZE_BYTES 32
+#define SAMPLE_COUNT (PACKET_SIZE_BYTES / sizeof(int32_t))
+typedef struct {
+    int32_t samples[SAMPLE_COUNT]; // Array to hold 8 raw samples
+} sound_data_t;
+
 /*
 ---------------------------------------------
 Edit IP + SSID in secrets.ini
@@ -25,9 +32,6 @@ static const char *TAG = "sound_tcp_node";
 static i2s_chan_handle_t rx_handle = NULL;
 QueueHandle_t sound_queue;
 
-typedef struct {
-    float rms_value;
-} sound_data_t;
 
 // --- WiFi Setup Functions ---
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
@@ -65,7 +69,9 @@ void wifi_init_sta(void) {
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
-// --- Signal Processing ---
+/*
+         === REMOVED FOR RAW SENDING ===
+// --- Signal Processing       ---
 float calculate_rms(int32_t *samples, int count) {
     double sum_squares = 0;
     long long sum = 0;
@@ -80,24 +86,29 @@ float calculate_rms(int32_t *samples, int count) {
     }
     return (float)sqrt(sum_squares / count);
 }
+*/
 
 // --- Task: I2S Recorder ---
 void i2s_recorder_task(void *args) {
-    int32_t *r_buf = (int32_t *)calloc(1, READ_LEN);
+    // Temporary buffer to read from I2S
+    int32_t r_buf[SAMPLE_COUNT]; 
     size_t bytes_read = 0;
     sound_data_t data_packet;
 
     while (1) {
-        if (i2s_channel_read(rx_handle, r_buf, READ_LEN, &bytes_read, 1000) == ESP_OK) {
-            int samples_read = bytes_read / sizeof(int32_t);
-            if (samples_read > 0) {
-                data_packet.rms_value = calculate_rms(r_buf, samples_read);
-                // Send to Queue
+        // FIXED: Used PACKET_SIZE_BYTES to match the definition at the top
+        if (i2s_channel_read(rx_handle, r_buf, PACKET_SIZE_BYTES, &bytes_read, 1000) == ESP_OK) {
+            
+            // If we successfully read the full 32 bytes
+            if (bytes_read == PACKET_SIZE_BYTES) {
+                // Copy raw data into the packet struct
+                memcpy(data_packet.samples, r_buf, PACKET_SIZE_BYTES);
+                
+                // Send raw data to Queue
                 xQueueSend(sound_queue, &data_packet, 0);
             }
         }
     }
-    free(r_buf);
 }
 
 // --- Task: TCP Client ---
@@ -127,10 +138,15 @@ void tcp_client_task(void *pvParameters) {
         ESP_LOGI(TAG, "Connected to TCP Server");
 
         while (1) {
+            // Wait for data from the queue
             if (xQueueReceive(sound_queue, &received_sound, portMAX_DELAY) == pdTRUE) {
-                char payload[64];
-                snprintf(payload, sizeof(payload), "RMS:%.2f\n", received_sound.rms_value);
-                if (send(sock, payload, strlen(payload), 0) < 0) {
+                
+                // SENDING RAW DATA
+                // We send the array of integers directly. 
+                // Size = 32 bytes (SAMPLE_COUNT * sizeof(int32_t))
+                int err = send(sock, received_sound.samples, sizeof(received_sound.samples), 0);
+                
+                if (err < 0) {
                     ESP_LOGE(TAG, "Send failed, reconnecting...");
                     break; 
                 }
@@ -141,7 +157,7 @@ void tcp_client_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-// --- Init: I2S Hardware (Strict Debug Version) ---
+// --- Init: I2S Hardware  ---
 void init_microphone() {
     ESP_LOGI(TAG, "Initializing I2S Microphone...");
 
