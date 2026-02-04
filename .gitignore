@@ -4,3 +4,7 @@
 .vscode/launch.json
 .vscode/ipch
 secrets.ini
+.env
+py_test/sec.py
+py_test/server_test
+py_test/__pycache__
