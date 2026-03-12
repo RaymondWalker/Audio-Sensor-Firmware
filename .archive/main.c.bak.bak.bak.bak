@@ -1,0 +1,151 @@
+// #include <WiFi.h>
+// #include <HTTPClient.h>
+
+#include <string.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "nvs_flash.h"  
+#include "esp_log.h"
+#include "driver/i2s_std.h"
+#include "esp_system.h"
+
+// Configuration
+const int TCP_PORT = 8001;
+const int HTTP_PORT = 8000;
+const char* SENSOR_ID = "sensor_001";
+const char* API_KEY = "key123";
+const char* LOCATION = "Room 101";
+
+// Audio settings
+const int BUFFER_SIZE = 1024;  // Send in chunks
+int16_t audioBuffer[BUFFER_SIZE];
+
+// Heartbeat settings
+const unsigned long HEARTBEAT_INTERVAL = 30000;  // 30 seconds
+unsigned long lastHeartbeat = 0;
+
+WiFiClient tcpClient;
+
+void setup() {
+  Serial.begin(115200);
+  connectWiFi();
+  connectTCP();
+}
+
+void connectWiFi() {
+  Serial.println("Connecting to WiFi...");
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected!");
+  Serial.println("IP: " + WiFi.localIP().toString());
+}
+
+void connectTCP() {
+  Serial.println("Connecting to TCP server...");
+  if (tcpClient.connect(SERVER_HOST, TCP_PORT)) {
+    // Send authentication handshake
+    String handshake = "{\"sensor_id\":\"" + String(SENSOR_ID) +
+                       "\",\"api_key\":\"" + String(API_KEY) +
+                       "\",\"location\":\"" + String(LOCATION) + "\"}\n";
+    tcpClient.print(handshake);
+
+    // Wait for response
+    unsigned long start = millis();
+    while (!tcpClient.available() && millis() - start < 5000) {
+      delay(10);
+    }
+
+    if (tcpClient.available()) {
+      String response = tcpClient.readStringUntil('\n');
+      if (response.indexOf("authenticated") > 0) {
+        Serial.println("Authenticated successfully!");
+      } else {
+        Serial.println("Authentication failed!");
+        tcpClient.stop();
+      }
+    } else {
+      Serial.println("No response from server");
+      tcpClient.stop();
+    }
+  } else {
+    Serial.println("TCP connection failed");
+  }
+}
+
+void sendHeartbeat() {
+  HTTPClient http;
+  String url = "http://" + String(SERVER_HOST) + ":" + String(HTTP_PORT) +
+               "/api/device-metrics/heartbeat";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-API-Key", API_KEY);
+  http.addHeader("X-Sensor-ID", SENSOR_ID);
+  http.addHeader("X-Location", LOCATION);
+
+  // Build payload with device metrics
+  // Customize these values based on your hardware
+  float battery = getBatteryPercent();  // Implement based on your hardware
+  int rssi = WiFi.RSSI();
+
+  String payload = "{\"battery_percent\":" + String(battery, 1) +
+                   ",\"signal_strength_dbm\":" + String(rssi) +
+                   ",\"firmware_version\":\"1.0.0\"}";
+
+  int httpCode = http.POST(payload);
+  if (httpCode == 200) {
+    Serial.println("Heartbeat sent successfully");
+  } else {
+    Serial.println("Heartbeat failed: " + String(httpCode));
+  }
+  http.end();
+}
+
+float getBatteryPercent() {
+  // Implement battery reading based on your hardware
+  // Example for ESP32 with voltage divider on GPIO 35:
+  // int raw = analogRead(35);
+  // float voltage = (raw / 4095.0) * 3.3 * 2;  // Adjust multiplier for your divider
+  // return map(voltage, 3.0, 4.2, 0, 100);
+  return 100.0;  // Default: return 100% if no battery monitoring
+}
+
+void loop() {
+  // Check WiFi connection
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected, reconnecting...");
+    connectWiFi();
+  }
+
+  // Handle TCP audio streaming
+  if (tcpClient.connected()) {
+    // Read audio from I2S microphone (e.g., INMP441)
+    // Fill audioBuffer with 16-bit PCM samples
+    readMicrophoneData(audioBuffer, BUFFER_SIZE);
+
+    // Send raw PCM bytes (little-endian)
+    tcpClient.write((uint8_t*)audioBuffer, BUFFER_SIZE * 2);
+  } else {
+    // Reconnect if disconnected
+    Serial.println("TCP disconnected, reconnecting...");
+    delay(5000);
+    connectTCP();
+  }
+
+  // Send periodic heartbeat
+  if (millis() - lastHeartbeat >= HEARTBEAT_INTERVAL) {
+    sendHeartbeat();
+    lastHeartbeat = millis();
+  }
+}
+
+void readMicrophoneData(int16_t* buffer, int samples) {
+  // Implement I2S microphone reading here
+  // Example for INMP441:
+    i2s_read(I2S_NUM_0, buffer, samples * 2, &bytesRead, portMAX_DELAY);
+}

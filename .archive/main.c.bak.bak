@@ -1,0 +1,219 @@
+/*
+V2 - 1wIP Socket
+Noise Monitoring Capstone Group
+*/
+
+//todo
+// re-add microphone
+// send data
+
+#include <string.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "nvs_flash.h"  
+#include "esp_log.h"
+#include "driver/i2s_std.h"
+#include "esp_system.h"
+
+
+static const char *TAG = "socket_client";
+
+// I2S Handle
+i2s_chan_handle_t rx_handle = NULL;
+
+void i2s_init() { 
+    ESP_LOGI(TAG, "Initializing I2S");
+
+    //I2S channel config
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    esp_err_t ret = i2s_new_channel(&chan_cfg, NULL, &rx_handle);
+    if(ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2S channel creation failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk= I2S_GPIO_UNUSED,
+            .ws = (gpio_num_t)I2S_WS_PIN,
+            .dout = I2S_GPIO_UNUSED,
+            .din = (gpio_num_t)I2S_SD_PIN,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv = false,
+            } ,
+        },
+    };
+    ret = i2s_channel_init_std_mode(rx_handle, &std_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2S std mode init failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    
+    // Enable the channel
+    ret = i2s_channel_enable(rx_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2S channel enable failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    
+    ESP_LOGI(TAG, "I2S initialized successfully");
+}
+
+void wifi_init() {
+    nvs_flash_init();
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_sta();
+    
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASS,
+        },
+    };
+    
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    esp_wifi_start();
+    esp_wifi_connect();
+    
+    // WAIT for connection and print IP
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+    
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_get_ip_info(netif, &ip_info);
+    
+    ESP_LOGI(TAG, "ESP32 IP Address: " IPSTR, IP2STR(&ip_info.ip));
+    ESP_LOGI(TAG, "Netmask: " IPSTR, IP2STR(&ip_info.netmask));
+    ESP_LOGI(TAG, "Gateway: " IPSTR, IP2STR(&ip_info.gw));
+}
+
+void stream_audio_data(int sock) {
+    ESP_LOGI(TAG, "Starting audio streaming...");
+    
+    // Buffer for I2S data (sized based on READ_LEN)
+    uint8_t *i2s_buffer = (uint8_t *)malloc(READ_LEN);
+    if (i2s_buffer == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate I2S buffer");
+        return;
+    }
+    
+    size_t bytes_read = 0;
+    int packet_count = 0;
+    
+    // Stream continuously until error or connection closes
+    while (1) {
+        // Read data from I2S
+        esp_err_t ret = i2s_channel_read(rx_handle, i2s_buffer, READ_LEN, &bytes_read, portMAX_DELAY);
+        
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "I2S read failed: %s", esp_err_to_name(ret));
+            break;
+        }
+        
+        if (bytes_read > 0) {
+            // Send the audio data over TCP
+            int sent = send(sock, i2s_buffer, bytes_read, 0);
+            
+            if (sent < 0) {
+                ESP_LOGE(TAG, "Send failed: %d", errno);
+                break;
+            } else if (sent != bytes_read) {
+                ESP_LOGW(TAG, "Partial send: %d of %d bytes", sent, bytes_read);
+            }
+            
+            packet_count++;
+            if (packet_count % 100 == 0) {
+                ESP_LOGI(TAG, "Sent %d packets (%d bytes each)", packet_count, bytes_read);
+            }
+        }
+        
+        // Small delay to prevent watchdog issues (optional, adjust as needed)
+        // vTaskDelay(1 / portTICK_PERIOD_MS);
+    }
+    
+    free(i2s_buffer);
+    ESP_LOGI(TAG, "Audio streaming stopped");
+}
+void socket_client_task() {
+    // Create socket
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "Socket creation failed");
+        return;
+    }
+    
+    // Configure destination
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(PORT);
+    inet_pton(AF_INET, HOST_IP, &dest_addr.sin_addr);
+    
+    int err = connect(sock, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+    if (err != 0) {
+        ESP_LOGE(TAG, "Connect failed: %d", errno);
+        close(sock);
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Connected to server!");
+    
+    // Send authentication string
+    // Note: Use double quotes for proper JSON format
+    const char *json_str = "{\"sensor_id\": \"sensor_001\", \"api_key\": \"key123\", \"location\": \"Raymond Laptop\"}";
+    int sent = send(sock, json_str, strlen(json_str), 0);
+    
+    if (sent < 0) {
+        ESP_LOGE(TAG, "Auth send failed: %d", errno);
+        close(sock);
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Authentication sent, waiting for response...");
+    
+    // Wait for authentication response
+    char rx_buffer[128];
+    int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+    
+    if (len > 0) {
+        rx_buffer[len] = 0; // Null terminate
+        ESP_LOGI(TAG, "Server response: %s", rx_buffer);
+        
+        // Check if authenticated 
+        if (strstr(rx_buffer, "OK") != NULL || strstr(rx_buffer, "AUTHENTICATED") != NULL) {
+            ESP_LOGI(TAG, "Authentication successful, starting audio stream...");
+            
+            // Start streaming audio data
+            stream_audio_data(sock);
+        } else {
+            ESP_LOGW(TAG, "Authentication failed or unexpected response");
+        }
+    } else if (len == 0) {
+        ESP_LOGW(TAG, "Server closed connection");
+    } else {
+        ESP_LOGE(TAG, "Receive failed: %d", errno);
+    }
+    
+    close(sock);
+    ESP_LOGI(TAG, "Socket closed");
+}
+
+void app_main() {
+    wifi_init();
+    vTaskDelay(5000 / portTICK_PERIOD_MS); // wait for connection
+
+    i2s_init();
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+    socket_client_task();
+}
+

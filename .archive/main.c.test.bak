@@ -1,0 +1,53 @@
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/i2s_std.h"
+#include "esp_log.h"
+
+static const char *TAG = "sound_tcp_node";
+static i2s_chan_handle_t rx_handle = NULL;
+
+void init_microphone() {
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    i2s_new_channel(&chan_cfg, NULL, &rx_handle);
+
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = (gpio_num_t)I2S_SCK_PIN,
+            .ws   = (gpio_num_t)I2S_WS_PIN,
+            .dout = I2S_GPIO_UNUSED,
+            .din  = (gpio_num_t)I2S_SD_PIN,
+        },
+    };
+    i2s_channel_init_std_mode(rx_handle, &std_cfg);
+    i2s_channel_enable(rx_handle);
+
+    ESP_LOGI(TAG, "Microphone is LIVE");
+}
+
+void read_mic(void *args) {
+    int32_t raw_samples[32];
+    size_t bytes_read = 0;
+
+    while(1)
+    {
+        esp_err_t ret = i2s_channel_read(rx_handle, raw_samples, sizeof(raw_samples), &bytes_read, portMAX_DELAY);
+
+        if (ret == ESP_OK && bytes_read > 0)
+        {
+            printf("Mic Value: %ld\n", raw_samples[0]);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+void app_main(void) 
+{
+    init_microphone();
+
+    xTaskCreate(read_mic, "read_mic", 4096, NULL, 5, NULL);
+}
